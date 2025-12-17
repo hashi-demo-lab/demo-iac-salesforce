@@ -3,21 +3,32 @@
 # Feature: EC2 Infrastructure with ALB and Nginx
 # Reference: FR-003 (Static web server configuration)
 
-set -e
+# Log all output to cloud-init-output.log
+exec > >(tee /var/log/user-data.log|logger -t user-data -s 2>/dev/console) 2>&1
+
+echo "Starting user-data script..."
 
 # Update system packages
+echo "Updating system packages..."
 dnf update -y
 
 # Install nginx
+echo "Installing nginx..."
 dnf install -y nginx
 
-# Get instance metadata
-TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
-INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
-AVAILABILITY_ZONE=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
-PRIVATE_IP=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+# Get instance metadata using IMDSv2
+echo "Fetching instance metadata..."
+TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600")
+INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id)
+AVAILABILITY_ZONE=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/availability-zone)
+PRIVATE_IP=$(curl -s -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/local-ipv4)
+
+echo "Instance ID: $INSTANCE_ID"
+echo "Availability Zone: $AVAILABILITY_ZONE"
+echo "Private IP: $PRIVATE_IP"
 
 # Create HTML page with instance information
+echo "Creating index.html..."
 cat > /usr/share/nginx/html/index.html <<EOF
 <!DOCTYPE html>
 <html lang="en">
@@ -76,15 +87,18 @@ cat > /usr/share/nginx/html/index.html <<EOF
 </html>
 EOF
 
-# Configure firewalld for HTTP
-systemctl enable firewalld
-systemctl start firewalld
-firewall-cmd --permanent --add-service=http
-firewall-cmd --reload
+# Disable firewalld if installed (security groups handle network security)
+echo "Disabling firewalld if present..."
+systemctl stop firewalld 2>/dev/null || true
+systemctl disable firewalld 2>/dev/null || true
 
 # Enable and start nginx
+echo "Starting nginx..."
 systemctl enable nginx
 systemctl start nginx
 
 # Verify nginx is running
+echo "Verifying nginx status..."
 systemctl status nginx
+
+echo "User-data script completed successfully!"

@@ -69,7 +69,7 @@ module "ec2_sg" {
     }
   ]
 
-  # Egress: Allow HTTP and HTTPS for package downloads
+  # Egress: Allow HTTP, HTTPS, and DNS for package downloads
   egress_with_cidr_blocks = [
     {
       from_port   = 80
@@ -84,6 +84,20 @@ module "ec2_sg" {
       protocol    = "tcp"
       cidr_blocks = "0.0.0.0/0"
       description = "HTTPS for package downloads"
+    },
+    {
+      from_port   = 53
+      to_port     = 53
+      protocol    = "udp"
+      cidr_blocks = "0.0.0.0/0"
+      description = "DNS for hostname resolution"
+    },
+    {
+      from_port   = 53
+      to_port     = 53
+      protocol    = "tcp"
+      cidr_blocks = "0.0.0.0/0"
+      description = "DNS over TCP for hostname resolution"
     }
   ]
 
@@ -131,6 +145,7 @@ module "ec2_instance" {
   subnet_id                   = each.value.subnet_id
   vpc_security_group_ids      = [module.ec2_sg.security_group_id]
   associate_public_ip_address = true
+  create_security_group       = false # Use only the custom security group
 
   # User data script for Nginx installation
   user_data = file("${path.module}/user-data.sh")
@@ -155,6 +170,9 @@ module "alb" {
   vpc_id             = data.aws_vpc.default.id
   subnets            = local.selected_subnets
   security_groups    = [module.alb_sg.security_group_id]
+
+  # Disable module's internal security group - use only custom SG
+  create_security_group = false
 
   # Disable deletion protection for development environment
   enable_deletion_protection = false
