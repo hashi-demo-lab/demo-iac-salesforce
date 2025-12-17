@@ -58,11 +58,13 @@ As a security-conscious engineer, I need all public traffic to be encrypted usin
 
 ### Edge Cases
 
-- What happens when both EC2 instances fail health checks simultaneously? The ALB should return 503 Service Unavailable to clients.
-- How does the system handle rapid scaling during initial provisioning? The target group should wait for health checks to pass before marking instances as healthy.
-- What happens if the ACM certificate fails to provision? Infrastructure deployment should fail gracefully with clear error messaging.
-- How does the system handle default VPC subnet availability? If fewer than 2 subnets exist in different AZs, deployment should fail with validation error.
-- What happens when user_data script fails on an EC2 instance? Health checks will fail, and the ALB will not route traffic to that instance.
+- What happens when both EC2 instances fail health checks simultaneously? The ALB should return 503 Service Unavailable to clients (expected behavior documented).
+- How does the system handle rapid scaling during initial provisioning? The target group waits for 2 consecutive successful health checks (60 seconds minimum) before marking instances as healthy.
+- What happens if the ACM certificate fails to provision? Terraform apply fails with error message; deployment guide provides troubleshooting steps for manual DNS validation or HTTP-only fallback configuration.
+- How does the system handle default VPC subnet availability? Terraform data source validates at least 2 subnets exist in different AZs; deployment fails with validation error if insufficient subnets available.
+- What happens when user_data script fails on an EC2 instance? Health checks fail after 2 consecutive attempts (60 seconds), ALB marks instance unhealthy and stops routing traffic to it.
+- What happens if dnf package manager cannot reach repositories during user_data execution? Instance provisioning completes but nginx fails to install, health checks fail, instance marked unhealthy (egress rules to 0.0.0.0/0:80,443 mitigate this).
+- What happens during concurrent requests while one instance is unhealthy? ALB immediately routes 100% of traffic to remaining healthy instance without dropped connections.
 
 ## Requirements *(mandatory)*
 
@@ -70,19 +72,23 @@ As a security-conscious engineer, I need all public traffic to be encrypted usin
 
 - **FR-001**: System MUST provision exactly 2 EC2 instances of type t3.micro across 2 different availability zones in ap-southeast-2
 - **FR-002**: System MUST use the existing default VPC and its subnets (no new VPC creation)
-- **FR-003**: System MUST install and configure Nginx on each EC2 instance to serve a static HTML page
+- **FR-003**: System MUST install and configure Nginx on each EC2 instance to serve a static HTML page displaying "Welcome to EC2 ALB Nginx Infrastructure" with server hostname and timestamp
 - **FR-004**: System MUST provision an Application Load Balancer (ALB) to distribute traffic across the EC2 instances
 - **FR-005**: System MUST configure ALB listeners for HTTP (port 80) with redirect to HTTPS, and HTTPS (port 443) forwarding to target group
-- **FR-006**: System MUST provision an ACM certificate for HTTPS support (self-signed for development environment)
+- **FR-006**: System MUST provision an ACM certificate for HTTPS support using DNS validation (manual DNS record creation required) or document HTTP-only fallback option for initial sandbox testing
 - **FR-007**: System MUST configure security group for ALB allowing inbound traffic on ports 80 and 443 from the internet (0.0.0.0/0)
 - **FR-008**: System MUST configure security group for EC2 instances allowing inbound traffic on port 80 only from the ALB security group
-- **FR-009**: System MUST configure target group with health checks on port 80 and HTTP protocol
+- **FR-009**: System MUST configure target group with health checks using HTTP protocol on port 80 to path `/` with 30-second interval, 5-second timeout, 2 consecutive successes for healthy, 2 consecutive failures for unhealthy
 - **FR-010**: System MUST register both EC2 instances with the ALB target group
 - **FR-011**: System MUST use private modules from app.terraform.io/hashi-demos-apj registry: alb (v10.1.0), ec2-instance (v6.1.4), security-group (v5.3.1), acm (v6.1.1)
 - **FR-012**: System MUST deploy infrastructure to HCP Terraform workspace: sandbox_ec2workspace in project: sandbox, organization: hashi-demos-apj
 - **FR-013**: System MUST output the ALB DNS endpoint for user access
-- **FR-014**: EC2 instances MUST use user_data scripts to automate Nginx installation and static content creation
-- **FR-015**: System MUST tag all resources with environment: development for cost tracking and identification
+- **FR-014**: EC2 instances MUST use user_data bash scripts with dnf package manager to install nginx, enable systemd service, create index.html with hostname/timestamp, and configure firewall for port 80
+- **FR-015**: System MUST use latest Amazon Linux 2023 AMI retrieved dynamically via AWS SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64`
+- **FR-016**: System MUST select subnets dynamically from default VPC using Terraform data sources, ensuring 2 subnets from different availability zones
+- **FR-017**: System MUST tag all resources with: `environment = "development"`, `project = "ec2-alb-nginx"`, `managed-by = "terraform"`, `workspace = "sandbox_ec2workspace"`
+- **FR-018**: ALB MUST have deletion protection DISABLED for development environment to enable rapid iteration
+- **FR-019**: Security groups MUST configure egress rules: ALB to EC2 on port 80, EC2 to internet (0.0.0.0/0) on ports 80 and 443 for package management
 
 ### Key Entities *(include if feature involves data)*
 
@@ -108,19 +114,45 @@ As a security-conscious engineer, I need all public traffic to be encrypted usin
 - **SC-007**: Static HTML page loads with sub-second response time under normal load conditions
 - **SC-008**: Infrastructure costs remain under 50 USD per month for development environment (t3.micro instances, minimal ALB usage)
 
+## Clarifications
+
+### Session 2025-12-17
+
+This section documents autonomous best-practice decisions made during the clarification phase to resolve ambiguities in the specification.
+
+- Q: What AMI should EC2 instances use for optimal compatibility and security? → A: Latest Amazon Linux 2023 AMI retrieved dynamically via AWS SSM parameter `/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64` for automatic security updates and long-term support.
+
+- Q: What specific content should the static HTML page display for testing? → A: Simple HTML page displaying "Welcome to EC2 ALB Nginx Infrastructure" with server hostname and timestamp to validate both load balancing distribution and successful deployment across instances.
+
+- Q: What health check configuration should the target group use? → A: HTTP protocol on port 80 to path `/` with 30-second interval, 5-second timeout, 2 consecutive successes for healthy status, 2 consecutive failures for unhealthy status (AWS defaults for reliable detection).
+
+- Q: How should SSL/TLS be configured given no Route53 zone exists? → A: Use ACM with DNS validation but document manual DNS record creation requirement in deployment guide; alternatively accept HTTP-only for initial sandbox testing to unblock development (HTTPS listener configured but may require manual certificate validation step).
+
+- Q: What user_data script should provision Nginx and content? → A: Bash script using dnf package manager (Amazon Linux 2023): install nginx, enable service, create /usr/share/nginx/html/index.html with hostname/timestamp, configure firewall for port 80.
+
+- Q: How should subnets be selected from default VPC? → A: Use Terraform data source `aws_subnets` with filter for default VPC, then select first 2 subnets from different availability zones dynamically to ensure multi-AZ placement without hardcoding subnet IDs.
+
+- Q: What specific tags should be applied for cost tracking? → A: Standard tags: `environment = "development"`, `project = "ec2-alb-nginx"`, `managed-by = "terraform"`, `workspace = "sandbox_ec2workspace"` for comprehensive resource identification and cost allocation.
+
+- Q: Should ALB have deletion protection enabled? → A: Deletion protection DISABLED for development/sandbox environment to allow rapid iteration and cleanup; would be enabled for production environments.
+
+- Q: What should happen if ACM certificate provisioning fails? → A: Terraform apply should fail with clear error message; deployment guide must include troubleshooting steps for manual DNS validation record creation or temporary HTTP-only fallback configuration.
+
+- Q: What security group egress rules should be configured? → A: ALB security group: egress to EC2 security group on port 80. EC2 security group: egress to 0.0.0.0/0 on ports 80 and 443 (for package downloads during user_data execution and potential future updates).
+
 ## Assumptions
 
 - Default VPC exists in ap-southeast-2 region with at least 2 subnets across different availability zones
 - AWS credentials are pre-configured in HCP Terraform workspace variables and provide sufficient permissions for EC2, VPC, ELB, and ACM operations
 - No Route53 hosted zone is available, therefore ACM certificate will use DNS validation with manual DNS record creation or self-signed approach for development
-- Static content requirements are minimal - a single HTML file is sufficient for validation
-- Development environment accepts self-signed or AWS-generated certificates without custom domain requirements
-- Compute instances will use initialization scripts compatible with standard Linux package managers
+- Static content requirements are minimal - a single HTML file is sufficient for validation (content: "Welcome to EC2 ALB Nginx Infrastructure" with hostname and timestamp)
+- Development environment accepts self-signed or AWS-generated certificates without custom domain requirements, or HTTP-only for initial testing
+- Compute instances will use Amazon Linux 2023 with dnf package manager for Nginx installation via user_data bash scripts
 - HCP Terraform workspace (sandbox_ec2workspace) already exists with proper permissions
 - Internet Gateway is already attached to the default VPC enabling public internet access
 - Cost optimization is prioritized over performance (t3.micro instances are adequate for low-traffic static content)
 - No auto-scaling is required for this development environment
-- Standard AWS health check intervals and thresholds are acceptable (30-second intervals, 2 consecutive checks for healthy/unhealthy status)
+- Standard AWS health check intervals and thresholds are acceptable (30-second intervals, 5-second timeout, 2 consecutive checks for healthy/unhealthy status transitions)
 
 ## Constraints
 
@@ -135,12 +167,13 @@ As a security-conscious engineer, I need all public traffic to be encrypted usin
 
 ## Dependencies
 
-- Existing default VPC in ap-southeast-2 with Internet Gateway attached
-- AWS credentials pre-configured in HCP Terraform with permissions for: EC2 (RunInstances, DescribeInstances), ELB (CreateLoadBalancer, CreateTargetGroup), ACM (RequestCertificate), VPC (DescribeVpcs, DescribeSubnets), Security Groups (CreateSecurityGroup, AuthorizeSecurityGroupIngress)
+- Existing default VPC in ap-southeast-2 with Internet Gateway attached and at least 2 subnets across different availability zones
+- AWS credentials pre-configured in HCP Terraform with permissions for: EC2 (RunInstances, DescribeInstances), ELB (CreateLoadBalancer, CreateTargetGroup), ACM (RequestCertificate, DescribeCertificate), VPC (DescribeVpcs, DescribeSubnets), Security Groups (CreateSecurityGroup, AuthorizeSecurityGroupIngress, AuthorizeSecurityGroupEgress), SSM (GetParameter for AMI lookup)
 - HCP Terraform workspace: sandbox_ec2workspace exists in organization hashi-demos-apj, project sandbox
 - Private modules available in HCP Terraform registry: alb v10.1.0, ec2-instance v6.1.4, security-group v5.3.1, acm v6.1.1
 - Terraform CLI for local validation and testing
 - GitHub repository for version control of Terraform code
+- Manual DNS record creation capability if ACM DNS validation is used (or acceptance of HTTP-only for initial testing)
 
 ## Out of Scope
 
